@@ -93,26 +93,28 @@ class HarnessAgent(BaseInstalledAgent):
             ),
         )
 
-        # Step 3: Install Python deps — only openai is required (tiktoken is optional)
-        # openai is a pure Python package (py3-none-any wheel), installs fast
+        # Step 3: Install openai — the only hard dependency
+        # Strategy: try pip first, then fall back to manual wheel install via curl
+        # openai is pure Python (py3-none-any), so manual install is straightforward
         await self.exec_as_root(
             environment,
             command=(
-                # Fast paths first (no apt-get needed)
-                "( pip3 install --break-system-packages -q openai 2>/dev/null ) || "
-                "( pip install --break-system-packages -q openai 2>/dev/null ) || "
-                "( python3 -m pip install --break-system-packages -q openai 2>/dev/null ) || "
-                # Try ensurepip to bootstrap pip
-                "( python3 -m ensurepip --break-system-packages 2>/dev/null && "
-                "  python3 -m pip install --break-system-packages -q openai 2>/dev/null ) || "
-                # Last resort: wait for dpkg lock, then apt-get install pip
-                "( for i in $(seq 1 30); do "
-                "    fuser /var/lib/dpkg/lock >/dev/null 2>&1 || break; "
-                "    sleep 2; "
-                "  done && "
-                "  apt-get update -qq 2>/dev/null && "
-                "  apt-get install -y -qq python3-pip 2>/dev/null && "
-                "  pip3 install --break-system-packages -q openai 2>/dev/null ) || "
+                # Check if openai is already importable
+                "python3 -c 'import openai' 2>/dev/null || "
+                # Try pip paths
+                "( pip3 install --break-system-packages -q openai 2>/dev/null && "
+                "  python3 -c 'import openai' 2>/dev/null ) || "
+                "( pip install --break-system-packages -q openai 2>/dev/null && "
+                "  python3 -c 'import openai' 2>/dev/null ) || "
+                "( python3 -m pip install --break-system-packages -q openai 2>/dev/null && "
+                "  python3 -c 'import openai' 2>/dev/null ) || "
+                # Nuclear option: download wheel directly and unzip into site-packages
+                "( SITE=$(python3 -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null || "
+                "         python3 -c 'import sys; print([p for p in sys.path if \"site-packages\" in p][0])') && "
+                "  cd /tmp && "
+                "  curl -sL -o openai.whl 'https://files.pythonhosted.org/packages/2a/9e/5bfa2270f902d5b92ab7d41ce0475b8630572e71e349b2a4996d14bdda93/openai-2.30.0-py3-none-any.whl' && "
+                "  python3 -m zipfile -e openai.whl \"$SITE\" && "
+                "  python3 -c 'import openai; print(f\"openai {openai.__version__} installed via wheel\")' ) || "
                 "true"
             ),
         )
