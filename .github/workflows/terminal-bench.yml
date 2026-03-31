@@ -1,0 +1,70 @@
+name: Terminal-Bench 2.0
+
+on:
+  workflow_dispatch:
+    inputs:
+      k:
+        description: 'Trials per task (leaderboard requires 5)'
+        required: false
+        default: '1'
+      concurrent:
+        description: 'Concurrent trials'
+        required: false
+        default: '2'
+      task_names:
+        description: 'Specific tasks (comma-separated, empty = all 89)'
+        required: false
+        default: ''
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1440  # 24 hours max
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install harbor
+          pip install -e .  2>/dev/null || true
+
+      - name: Run Terminal-Bench
+        env:
+          DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          HARNESS_MODEL: ${{ secrets.HARNESS_MODEL }}
+        run: |
+          TASK_ARGS=""
+          if [ -n "${{ github.event.inputs.task_names }}" ]; then
+            IFS=',' read -ra TASKS <<< "${{ github.event.inputs.task_names }}"
+            for task in "${TASKS[@]}"; do
+              TASK_ARGS="$TASK_ARGS --task-name $(echo $task | xargs)"
+            done
+          fi
+
+          harbor run \
+            -d "terminal-bench@2.0" \
+            --agent-import-path benchmarks.harbor_agent:HarnessAgent \
+            --env daytona \
+            -k ${{ github.event.inputs.k }} \
+            --n-concurrent-trials ${{ github.event.inputs.concurrent }} \
+            --agent-setup-timeout-multiplier 2 \
+            --max-retries 3 \
+            --retry-include DaytonaError \
+            --retry-include AgentSetupTimeoutError \
+            --retry-include AddTestsDirError \
+            $TASK_ARGS
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terminal-bench-results
+          path: jobs/
+          retention-days: 30
