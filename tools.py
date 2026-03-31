@@ -46,8 +46,9 @@ def read_file(path: str) -> str:
     if len(content) > limit:
         total = len(content)
         content = content[:limit] + (
-            f"\n\n⚠️ OUTPUT TRUNCATED: showing {limit} of {total} characters. "
-            f"Use run_bash with head/tail/sed to read specific sections."
+            f"\n\n[TRUNCATED] You are seeing {limit} of {total} total characters. "
+            f"The remaining {total - limit} characters are NOT shown above. "
+            f"You MUST use run_bash with head/tail/sed to read the rest if needed."
         )
     return content
 
@@ -88,7 +89,7 @@ def list_files(directory: str = ".") -> str:
     return "\n".join(entries[:200])
 
 
-def run_bash(command: str, timeout: int = 120) -> str:
+def run_bash(command: str, timeout: int = 300) -> str:
     """Run a shell command inside the workspace. Returns stdout+stderr."""
     try:
         result = subprocess.run(
@@ -104,12 +105,17 @@ def run_bash(command: str, timeout: int = 120) -> str:
             total = len(output)
             output = (
                 output[:15_000]
-                + f"\n\n⚠️ OUTPUT TRUNCATED: showing 30000 of {total} characters (first 15k + last 15k).\n\n"
+                + f"\n\n[TRUNCATED] Showing first 15k + last 15k of {total} total characters. "
+                f"The middle {total - 30_000} characters are NOT shown.\n\n"
                 + output[-15_000:]
             )
         return output or "(no output)"
     except subprocess.TimeoutExpired:
-        return f"[error] Command timed out after {timeout}s"
+        return (
+            f"[error] Command timed out after {timeout}s. "
+            f"If this command legitimately needs more time (e.g. compilation, training), "
+            f"retry with a larger timeout parameter."
+        )
     except Exception as e:
         return f"[error] {e}"
 
@@ -320,10 +326,10 @@ TOOL_SCHEMAS = [
             "description": "Read the contents of a file in the workspace.",
             "parameters": {
                 "type": "object",
+                "required": ["path"],
                 "properties": {
                     "path": {"type": "string", "description": "Relative path inside workspace"}
                 },
-                "required": ["path"],
             },
         },
     },
@@ -334,10 +340,10 @@ TOOL_SCHEMAS = [
             "description": "Read a skill file from the skills/ directory. Use this to load a skill's SKILL.md or any sub-files referenced within it. Path should be relative to project root (e.g. 'skills/frontend-design/SKILL.md').",
             "parameters": {
                 "type": "object",
+                "required": ["path"],
                 "properties": {
                     "path": {"type": "string", "description": "Relative path to skill file (e.g. 'skills/frontend-design/SKILL.md')"}
                 },
-                "required": ["path"],
             },
         },
     },
@@ -348,11 +354,11 @@ TOOL_SCHEMAS = [
             "description": "Create or overwrite a file in the workspace.",
             "parameters": {
                 "type": "object",
+                "required": ["path", "content"],
                 "properties": {
                     "path": {"type": "string", "description": "Relative path inside workspace"},
                     "content": {"type": "string", "description": "File content to write"},
                 },
-                "required": ["path", "content"],
             },
         },
     },
@@ -377,18 +383,18 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "run_bash",
-            "description": "Execute a shell command in the workspace directory. Use for installing deps, running builds, starting servers, running tests, etc.",
+            "description": "Execute a shell command in the workspace directory. Use for installing deps, running builds, starting servers, running tests, etc. For long-running commands (compilation, training), increase the timeout parameter.",
             "parameters": {
                 "type": "object",
+                "required": ["command"],
                 "properties": {
                     "command": {"type": "string", "description": "Shell command to run"},
                     "timeout": {
                         "type": "integer",
-                        "description": "Timeout in seconds (default 120)",
-                        "default": 120,
+                        "description": "Timeout in seconds (default 300). Increase for long builds/training.",
+                        "default": 300,
                     },
                 },
-                "required": ["command"],
             },
         },
     },
@@ -407,6 +413,7 @@ TOOL_SCHEMAS = [
             ),
             "parameters": {
                 "type": "object",
+                "required": ["task"],
                 "properties": {
                     "task": {
                         "type": "string",
@@ -418,7 +425,6 @@ TOOL_SCHEMAS = [
                         "default": "assistant",
                     },
                 },
-                "required": ["task"],
             },
         },
     },
@@ -505,6 +511,87 @@ BROWSER_TOOL_SCHEMAS = [
 ]
 
 # ---------------------------------------------------------------------------
+# Tool-call pre-validation & auto-correction
+# ---------------------------------------------------------------------------
+
+def _validate_and_fix(name: str, arguments: dict) -> tuple[dict, str | None]:
+    """
+    Pre-validate tool arguments and auto-correct common mistakes.
+    Returns (fixed_arguments, warning_message_or_None).
+
+    This is a lightweight heuristic layer — no LLM calls.
+    Catches the most common tool-call errors from weaker models:
+      - Empty/missing required arguments
+      - Absolute paths that should be relative
+      - Obvious typos in common patterns
+    """
+    warning = None
+
+    if name == "write_file":
+        path = arguments.get("path", "")
+        content = arguments.get("content")
+
+        # Empty path
+        if not path or not path.strip():
+            return arguments, "[auto-fix] Empty file path. You must specify a path."
+
+        # Absolute path → make relative to workspace
+        if path.startswith("/"):
+            import re
+            # Strip common workspace prefixes
+            for prefix in ["/app/", "/home/user/", "/workspace/"]:
+                if path.startswith(prefix):
+                    arguments["path"] = path[len(prefix):]
+                    warning = f"[auto-fix] Converted absolute path '{path}' to relative '{arguments['path']}'"
+                    break
+
+        # Missing content
+        if content is None:
+            arguments["content"] = ""
+            warning = "[auto-fix] Missing 'content' argument — writing empty file."
+
+    elif name == "read_file":
+        path = arguments.get("path", "")
+
+        # Absolute path → relative
+        if path.startswith("/"):
+            for prefix in ["/app/", "/home/user/", "/workspace/"]:
+                if path.startswith(prefix):
+                    arguments["path"] = path[len(prefix):]
+                    warning = f"[auto-fix] Converted absolute path '{path}' to relative '{arguments['path']}'"
+                    break
+
+    elif name == "run_bash":
+        command = arguments.get("command", "")
+
+        # Empty command
+        if not command or not command.strip():
+            return arguments, "[auto-fix] Empty command. You must specify a command to run."
+
+        # Detect interactive commands that will hang
+        import re
+        interactive_cmds = ["vim", "nano", "vi", "less", "more", "top", "htop"]
+        first_word = command.strip().split()[0] if command.strip() else ""
+        if first_word in interactive_cmds:
+            return arguments, (
+                f"[auto-fix] '{first_word}' is an interactive command that will hang. "
+                f"Use non-interactive alternatives: "
+                f"for editing use write_file, for viewing use cat/head/tail."
+            )
+
+    elif name == "list_files":
+        directory = arguments.get("directory", ".")
+        if directory.startswith("/"):
+            for prefix in ["/app/", "/home/user/", "/workspace/"]:
+                if directory.startswith(prefix):
+                    arguments["directory"] = directory[len(prefix):] or "."
+                    warning = f"[auto-fix] Converted absolute path '{directory}' to relative '{arguments['directory']}'"
+                    break
+
+    return arguments, warning
+
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -521,11 +608,27 @@ TOOL_DISPATCH = {
 
 
 def execute_tool(name: str, arguments: dict) -> str:
-    """Execute a tool by name and return the string result."""
+    """Execute a tool by name with pre-validation and auto-correction."""
     fn = TOOL_DISPATCH.get(name)
     if fn is None:
         return f"[error] Unknown tool: {name}"
+
+    # Pre-validate and auto-correct arguments
+    arguments, fix_warning = _validate_and_fix(name, arguments)
+
+    # If validation returned a blocking error (no fix possible), return it
+    if fix_warning and fix_warning.startswith("[auto-fix] Empty"):
+        return fix_warning
+    if fix_warning and "interactive command" in fix_warning:
+        return fix_warning
+
     try:
-        return fn(**arguments)
+        result = fn(**arguments)
     except Exception as e:
-        return f"[error] {type(e).__name__}: {e}"
+        result = f"[error] {type(e).__name__}: {e}"
+
+    # Prepend the auto-fix warning so the model knows what was corrected
+    if fix_warning:
+        result = f"{fix_warning}\n\n{result}"
+
+    return result

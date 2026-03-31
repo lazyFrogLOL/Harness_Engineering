@@ -1,6 +1,6 @@
 # Profile registry
 
-from profiles.base import BaseProfile, AgentConfig
+from profiles.base import BaseProfile, AgentConfig, ProfileConfig
 from profiles.app_builder import AppBuilderProfile
 from profiles.terminal import TerminalProfile
 from profiles.swe_bench import SWEBenchProfile
@@ -14,13 +14,13 @@ PROFILES: dict[str, type[BaseProfile]] = {
 }
 
 
-def get_profile(name: str) -> BaseProfile:
-    """Get a profile instance by name."""
+def get_profile(name: str, cfg: ProfileConfig | None = None) -> BaseProfile:
+    """Get a profile instance by name, optionally with custom config."""
     cls = PROFILES.get(name)
     if cls is None:
         available = ", ".join(PROFILES.keys())
         raise ValueError(f"Unknown profile: {name}. Available: {available}")
-    return cls()
+    return cls(cfg=cfg)
 
 
 def list_profiles() -> list[dict[str, str]]:

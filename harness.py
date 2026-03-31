@@ -72,24 +72,29 @@ class Harness:
         self.planner = Agent(
             "planner", planner_cfg.system_prompt + skill_catalog,
             use_tools=True, extra_tool_schemas=planner_cfg.extra_tool_schemas,
+            middlewares=planner_cfg.middlewares, time_budget=planner_cfg.time_budget,
         ) if planner_cfg.enabled else None
 
         self.builder = Agent(
             "builder", builder_cfg.system_prompt + skill_catalog,
             use_tools=True, extra_tool_schemas=builder_cfg.extra_tool_schemas,
+            middlewares=builder_cfg.middlewares, time_budget=builder_cfg.time_budget,
         )
 
         self.evaluator = Agent(
             "evaluator", evaluator_cfg.system_prompt,
             use_tools=True, extra_tool_schemas=evaluator_cfg.extra_tool_schemas,
+            middlewares=evaluator_cfg.middlewares, time_budget=evaluator_cfg.time_budget,
         ) if evaluator_cfg.enabled else None
 
         self.contract_proposer = Agent(
             "contract_proposer", proposer_cfg.system_prompt, use_tools=True,
+            middlewares=proposer_cfg.middlewares,
         ) if proposer_cfg.enabled else None
 
         self.contract_reviewer = Agent(
             "contract_reviewer", reviewer_cfg.system_prompt, use_tools=True,
+            middlewares=reviewer_cfg.middlewares,
         ) if reviewer_cfg.enabled else None
 
     def run(self, user_prompt: str) -> None:

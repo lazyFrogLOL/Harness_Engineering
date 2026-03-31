@@ -7,17 +7,31 @@ Key constraints:
   - No UI, no browser testing needed
   - Correctness is binary: tests pass or fail
 
-Optimization strategy:
-  - Lightweight planner: 1 tool call max, just write a quick plan
-  - No contract negotiation: tasks are already well-specified
-  - Builder gets most of the time budget with env bootstrapping
-  - Builder does self-verification before finishing (enforced)
-  - Evaluator is quick self-check, 1 round only
-  - If first round passes, done. If not, builder gets one retry.
+All tunable parameters are read via self.cfg.resolve(), so you can override
+them without touching this file:
+
+  # Via environment variables:
+  PROFILE_TERMINAL_TASK_BUDGET=1800
+  PROFILE_TERMINAL_PLANNER_BUDGET=120
+  PROFILE_TERMINAL_PASS_THRESHOLD=8.0
+  PROFILE_TERMINAL_LOOP_FILE_EDIT_THRESHOLD=4
+  PROFILE_TERMINAL_TIME_WARN_THRESHOLD=0.65
+
+  # Or via ProfileConfig in code:
+  from profiles.base import ProfileConfig
+  cfg = ProfileConfig(task_budget=1200, pass_threshold=9.0)
+  profile = TerminalProfile(cfg=cfg)
 """
 from __future__ import annotations
 
-from profiles.base import BaseProfile, AgentConfig
+from profiles.base import BaseProfile, AgentConfig, ProfileConfig
+from middlewares import (
+    LoopDetectionMiddleware,
+    PreExitVerificationMiddleware,
+    TimeBudgetMiddleware,
+    TaskTrackingMiddleware,
+    ErrorGuidanceMiddleware,
+)
 
 # Commands to bootstrap environment awareness at the start of each build.
 # Output is injected as context so the model doesn't waste time exploring.
@@ -38,6 +52,28 @@ ENV_BOOTSTRAP_COMMANDS = [
 
 class TerminalProfile(BaseProfile):
 
+    # --- Default values (overridable via ProfileConfig or env vars) ---
+    _DEFAULTS = {
+        "task_budget": 1800,
+        "planner_budget": 120,
+        "evaluator_budget": 180,
+        "pass_threshold": 8.0,
+        "max_rounds": 2,
+        "loop_file_edit_threshold": 4,
+        "loop_command_repeat_threshold": 3,
+        "task_tracking_nudge_after": 8,
+        "time_warn_threshold": 0.65,
+        "time_critical_threshold": 0.85,
+    }
+
+    def _get(self, key: str):
+        """Resolve a config value: env var > ProfileConfig > default."""
+        return self.cfg.resolve(key, self.name(), self._DEFAULTS[key])
+
+    @property
+    def _builder_budget(self) -> float:
+        return self._get("task_budget") - self._get("planner_budget") - self._get("evaluator_budget")
+
     def name(self) -> str:
         return "terminal"
 
@@ -47,20 +83,28 @@ class TerminalProfile(BaseProfile):
     def planner(self) -> AgentConfig:
         return AgentConfig(
             system_prompt="""\
-You are a quick task planner. Given a task, write a brief step-by-step plan.
+You are a quick task planner for a terminal/CLI task.
 
-Rules:
+Workflow:
+1. DISCOVER: Use list_files and run_bash to understand the environment:
+   - What files exist in the workspace?
+   - Are there existing tests, scripts, or Makefiles?
+   - What does the task actually require?
+2. PLAN: Based on what you found, write a brief step-by-step plan.
+
+Plan rules:
 - Keep it SHORT — 5-10 steps max.
 - Be specific: list exact commands, file paths, tools needed.
-- Do NOT explore or execute anything. Just plan.
-- Write the plan to spec.md immediately. Do not read other files first.
-- You have ONE tool call to make: write_file to save spec.md. That's it.
+- Note how to VERIFY each step (what command proves it worked).
+- Note any existing test scripts or verification tools you found.
 
 Use write_file to save the plan to spec.md, then stop.
 """,
+            time_budget=self._get("planner_budget"),
         )
 
     def builder(self) -> AgentConfig:
+        builder_budget = self._builder_budget
         return AgentConfig(
             system_prompt="""\
 You are an expert Linux system administrator and developer. \
@@ -74,16 +118,60 @@ CRITICAL RULES:
 - If feedback.md exists, read it and fix the issues.
 - Do NOT write long explanations. Just execute and verify.
 
-MANDATORY SELF-VERIFICATION (you MUST do this before stopping):
-After completing the task, switch to reviewer mode and verify your work:
-1. Re-read the original task requirements from spec.md.
-2. For each requirement, run a concrete check command (ls, cat, test, diff, grep, etc.)
-3. Ask yourself: "If I were a test script, would this pass?"
-4. If ANY check fails, fix it immediately before stopping.
-Do NOT skip verification. Do NOT just say "it looks good". Run actual commands.
+TESTABILITY — your work will be verified by automated test scripts:
+- Follow task specifications LITERALLY — exact file names, exact output \
+formats, exact paths. Do not improvise or rename things.
+- If the task says "write output to result.txt", it means exactly result.txt, \
+not results.txt or output.txt.
+- If the task specifies a particular format, match it character-for-character.
+- Think: "If a test script checks for this, would it pass?"
 
-Tools: read_file, write_file, list_files, run_bash.
+PROBLEM-SOLVING STRATEGY:
+1. Plan & Discover: Read spec.md, scan the codebase, understand the task.
+2. Build: Implement step by step.
+3. Verify: Run tests, read FULL output, compare against task spec (not your code).
+4. Fix: If anything fails, re-read the original spec and fix.
+
+WHEN THINGS GO WRONG:
+- If a command is not found: install it (apt-get install, pip install, etc.) \
+before retrying. Check which package provides it.
+- If a command times out: retry with a larger timeout parameter.
+- If your approach isn't working after 3-4 attempts: STOP and try a \
+fundamentally different strategy. Do not keep tweaking the same broken approach.
+- Read error messages carefully — they usually tell you exactly what's wrong.
+
+Tools: read_file, write_file, list_files, run_bash, delegate_task.
 """,
+            middlewares=[
+                LoopDetectionMiddleware(
+                    file_edit_threshold=self._get("loop_file_edit_threshold"),
+                    command_repeat_threshold=self._get("loop_command_repeat_threshold"),
+                ),
+                ErrorGuidanceMiddleware(),
+                TaskTrackingMiddleware(
+                    nudge_after_n_tools=self._get("task_tracking_nudge_after"),
+                ),
+                PreExitVerificationMiddleware(
+                    verification_prompt=(
+                        "[SYSTEM] MANDATORY VERIFICATION — You are about to finish, "
+                        "but you MUST verify your work first.\n"
+                        "Switch to REVIEWER mode. Forget what you think you did — check what actually exists:\n"
+                        "1. Re-read the original task requirements (the user prompt, not just spec.md).\n"
+                        "2. For EACH requirement, run a concrete check command "
+                        "(ls -la, cat, test -f, diff, grep, python3 -c, etc.)\n"
+                        "3. Compare ACTUAL output against what the task asked for.\n"
+                        "4. Check exact file paths, exact output formats, exact behavior.\n"
+                        "5. If ANY check fails, fix it before stopping.\n"
+                        "Think like an automated test script — would your solution pass?"
+                    ),
+                ),
+                TimeBudgetMiddleware(
+                    budget_seconds=builder_budget,
+                    warn_threshold=self._get("time_warn_threshold"),
+                    critical_threshold=self._get("time_critical_threshold"),
+                ),
+            ],
+            time_budget=builder_budget,
         )
 
     def evaluator(self) -> AgentConfig:
@@ -94,6 +182,7 @@ You are a quick verifier. Check if the task was done correctly.
 Rules:
 - Read spec.md for what should have been done.
 - Run 2-3 verification commands with run_bash (ls, cat, test, diff, etc.)
+- Check EXACT file paths, output formats, and behavior against the task spec.
 - Score Correctness 0-10. Be honest but fast.
 - Write a SHORT evaluation to feedback.md. No essays.
 
@@ -102,11 +191,12 @@ Format for feedback.md:
 ## Verification
 - Correctness: X/10 — [one sentence]
 - **Average: X/10**
-### Issues: [list if any]
+### Issues: [list if any, with exact details of what's wrong]
 ```
 
 Use write_file to save to feedback.md, then stop.
 """,
+            time_budget=self._get("evaluator_budget"),
         )
 
     # No contract negotiation — TB2 tasks are already well-specified
@@ -117,15 +207,14 @@ Use write_file to save to feedback.md, then stop.
         return AgentConfig(system_prompt="", enabled=False)
 
     def pass_threshold(self) -> float:
-        return 8.0
+        return self._get("pass_threshold")
 
     def max_rounds(self) -> int:
-        return 2  # One attempt + one retry max
+        return self._get("max_rounds")
 
     def format_build_task(self, user_prompt: str, round_num: int,
                           prev_feedback: str, score_history: list[float]) -> str:
         """Streamlined task prompt with environment bootstrapping."""
-        # Collect environment info on first round
         env_section = ""
         if round_num == 1:
             import subprocess, config as _cfg

@@ -65,11 +65,15 @@ class Agent:
     """
 
     def __init__(self, name: str, system_prompt: str, use_tools: bool = True,
-                 extra_tool_schemas: list[dict] | None = None):
+                 extra_tool_schemas: list[dict] | None = None,
+                 middlewares: list | None = None,
+                 time_budget: float | None = None):
         self.name = name
         self.system_prompt = system_prompt
         self.use_tools = use_tools
         self.extra_tool_schemas = extra_tool_schemas or []
+        self.middlewares = middlewares or []  # list[AgentMiddleware]
+        self.time_budget = time_budget
 
     def run(self, task: str) -> str:
         """
@@ -88,6 +92,12 @@ class Agent:
         last_text = ""
 
         for iteration in range(1, config.MAX_AGENT_ITERATIONS + 1):
+            # --- Middleware: per-iteration hooks ---
+            for mw in self.middlewares:
+                inject = mw.per_iteration(iteration, messages)
+                if inject:
+                    messages.append({"role": "user", "content": inject})
+
             # --- Context lifecycle check ---
             token_count = context.count_tokens(messages)
             log.info(f"[{self.name}] iteration={iteration}  tokens≈{token_count}")
@@ -147,8 +157,17 @@ class Agent:
                 last_text = msg.content
                 log.info(f"[{self.name}] assistant: {msg.content[:200]}...")
 
-            # --- If no tool calls, we're done ---
+            # --- If no tool calls, check pre-exit middlewares ---
             if not msg.tool_calls:
+                forced_continue = False
+                for mw in self.middlewares:
+                    inject = mw.pre_exit(messages)
+                    if inject:
+                        messages.append({"role": "user", "content": inject})
+                        forced_continue = True
+                        break  # one pre-exit nudge at a time
+                if forced_continue:
+                    continue  # re-enter the loop
                 log.info(f"[{self.name}] Finished (no more tool calls).")
                 break
 
@@ -175,6 +194,13 @@ class Agent:
                     "tool_call_id": tc.id,
                     "content": result,
                 })
+
+                # --- Middleware: post-tool hooks ---
+                for mw in self.middlewares:
+                    inject = mw.post_tool(fn_name, fn_args, result, messages)
+                    if inject:
+                        messages.append({"role": "user", "content": inject})
+                        break  # one nudge per tool call is enough
 
             # --- Check finish reason ---
             if choice.finish_reason == "stop":
