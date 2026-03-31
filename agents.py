@@ -133,6 +133,17 @@ class Agent:
                 continue
 
             consecutive_errors = 0
+
+            # --- Guard against empty choices (some providers return empty) ---
+            if not response.choices:
+                log.warning(f"[{self.name}] API returned empty choices. Retrying...")
+                consecutive_errors += 1
+                if consecutive_errors >= config.MAX_TOOL_ERRORS:
+                    log.error(f"[{self.name}] Too many empty responses, aborting.")
+                    break
+                time.sleep(2)
+                continue
+
             choice = response.choices[0]
             msg = choice.message
 
