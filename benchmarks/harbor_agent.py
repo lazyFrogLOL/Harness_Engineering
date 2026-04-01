@@ -43,12 +43,6 @@ class HarnessAgent(BaseInstalledAgent):
     with --profile terminal for each task.
     """
 
-    # micromamba paths — self-contained Python env, no apt-get needed
-    MAMBA_ROOT = "/opt/mamba"
-    MAMBA_BIN = "/opt/mamba/bin/micromamba"
-    MAMBA_ENV = "/opt/mamba/envs/agent"
-    MAMBA_PYTHON = "/opt/mamba/envs/agent/bin/python3"
-
     @staticmethod
     def name() -> str:
         return "harness-agent"
@@ -60,13 +54,8 @@ class HarnessAgent(BaseInstalledAgent):
     async def install(self, environment: BaseEnvironment) -> None:
         """Install dependencies and clone our repo into the container.
 
-        Strategy (ordered by speed):
-        1. If python3 + pip exist -> use them directly (fastest, ~10s)
-        2. If python3 exists but no pip -> curl wheel install (~15s)
-        3. If no python3 at all -> micromamba install (~30-60s, no apt-get)
-
-        micromamba is a single static binary that installs a complete
-        Python environment from conda-forge. No apt-get, no dpkg locks.
+        Primary strategy: git clone repo (includes vendor_wheels/), then
+        pip install openai from local wheels. No network needed for Python deps.
         """
         # Step 1: Ensure git is available
         await self.exec_as_root(
@@ -81,7 +70,7 @@ class HarnessAgent(BaseInstalledAgent):
             ),
         )
 
-        # Step 2: Clone repo
+        # Step 2: Clone repo (includes vendor_wheels/ with openai + all deps)
         await self.exec_as_agent(
             environment,
             command=(
@@ -91,45 +80,37 @@ class HarnessAgent(BaseInstalledAgent):
             ),
         )
 
-        # Step 3: Ensure python3 + openai are available
+        # Step 3: Install openai from vendored wheels (fully offline, no network)
         await self.exec_as_root(
             environment,
             command=(
-                # Fast path: already works
+                # Check if already importable
                 "python3 -c 'import openai' 2>/dev/null || "
-                # Medium path: python3 exists, try pip
-                "( command -v python3 >/dev/null 2>&1 && "
-                "  ( pip3 install --break-system-packages -q openai 2>/dev/null || "
-                "    pip install --break-system-packages -q openai 2>/dev/null || "
-                "    python3 -m pip install --break-system-packages -q openai 2>/dev/null ) && "
+                # Offline install from vendored wheels
+                "( pip3 install --break-system-packages --no-index "
+                "  --find-links=/home/user/harness-agent/vendor_wheels "
+                "  openai 2>/dev/null && "
                 "  python3 -c 'import openai' 2>/dev/null ) || "
-                # Medium path: python3 exists but no pip, use curl+unzip
-                "( command -v python3 >/dev/null 2>&1 && "
-                "  SITE=$(python3 -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null) && "
-                "  cd /tmp && "
-                "  curl -sL -o openai.whl "
-                "'https://files.pythonhosted.org/packages/2a/9e/5bfa2270f902d5b92ab7d41ce0475b8630572e71e349b2a4996d14bdda93/openai-2.30.0-py3-none-any.whl' && "
-                "  python3 -m zipfile -e openai.whl \"$SITE\" && "
+                "( pip install --break-system-packages --no-index "
+                "  --find-links=/home/user/harness-agent/vendor_wheels "
+                "  openai 2>/dev/null && "
                 "  python3 -c 'import openai' 2>/dev/null ) || "
-                # Slow path: no python3 at all, use micromamba
-                "( echo 'No python3 found, installing via micromamba...' && "
-                f"  mkdir -p {self.MAMBA_ROOT} && "
-                "  curl -sL https://micro.mamba.pm/api/micromamba/linux-64/latest "
-                f"    | tar -xj -C {self.MAMBA_ROOT} --strip-components=1 bin/micromamba && "
-                f"  {self.MAMBA_BIN} create -y -q -p {self.MAMBA_ENV} "
-                "    -c conda-forge python=3.12 pip && "
-                f"  {self.MAMBA_ENV}/bin/pip install -q openai && "
-                f"  {self.MAMBA_PYTHON} -c 'import openai; print(\"openai installed via micromamba\")' ) || "
-                # Nuclear: standalone python from GitHub + openai wheel
-                "( echo 'micromamba failed, trying standalone python...' && "
-                "  cd /tmp && "
-                "  curl -sL -o python.tar.zst "
-                "    'https://github.com/astral-sh/python-build-standalone/releases/download/20250604/cpython-3.12.11+20250604-x86_64-unknown-linux-gnu-install_only.tar.gz' && "
-                f"  mkdir -p {self.MAMBA_ROOT} && "
-                f"  tar -xf python.tar.zst -C {self.MAMBA_ROOT} --strip-components=1 && "
-                f"  {self.MAMBA_ROOT}/bin/python3 -m pip install -q openai && "
-                f"  {self.MAMBA_ROOT}/bin/python3 -c 'import openai; print(\"openai installed via standalone python\")' ) || "
-                "true"
+                "( python3 -m pip install --break-system-packages --no-index "
+                "  --find-links=/home/user/harness-agent/vendor_wheels "
+                "  openai 2>/dev/null && "
+                "  python3 -c 'import openai' 2>/dev/null ) || "
+                # If no pip at all, try ensurepip first
+                "( python3 -m ensurepip --break-system-packages 2>/dev/null && "
+                "  python3 -m pip install --break-system-packages --no-index "
+                "  --find-links=/home/user/harness-agent/vendor_wheels "
+                "  openai 2>/dev/null ) || "
+                # Last resort: manual unzip all wheels into site-packages
+                "( SITE=$(python3 -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null) && "
+                "  for whl in /home/user/harness-agent/vendor_wheels/*.whl; do "
+                "    python3 -m zipfile -e \"$whl\" \"$SITE\" 2>/dev/null; "
+                "  done && "
+                "  python3 -c 'import openai; print(\"openai installed via wheel unzip\")' ) || "
+                "echo 'WARNING: openai install failed'"
             ),
         )
 
@@ -154,17 +135,13 @@ class HarnessAgent(BaseInstalledAgent):
         env_vars.append("HARNESS_FLAT_WORKSPACE=1")
         env_prefix = " ".join(env_vars)
 
-        # Auto-detect which python has openai: system > mamba env > standalone
+        # Run harness with system python3
         await self.exec_as_agent(
             environment,
             command=(
                 f"cd /home/user/harness-agent && "
-                f"if python3 -c 'import openai' 2>/dev/null; then PYTHON=python3; "
-                f"elif {self.MAMBA_PYTHON} -c 'import openai' 2>/dev/null; then PYTHON={self.MAMBA_PYTHON}; "
-                f"elif {self.MAMBA_ROOT}/bin/python3 -c 'import openai' 2>/dev/null; then PYTHON={self.MAMBA_ROOT}/bin/python3; "
-                f"else echo 'FATAL: no working python with openai found' && exit 1; fi && "
                 f"{env_prefix} "
-                f"$PYTHON harness.py --profile terminal {escaped}"
+                f"python3 harness.py --profile terminal {escaped}"
             ),
         )
 
