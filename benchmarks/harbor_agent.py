@@ -54,15 +54,18 @@ class HarnessAgent(BaseInstalledAgent):
     async def install(self, environment: BaseEnvironment) -> None:
         """Install dependencies and clone our repo into the container.
 
-        Primary strategy: git clone repo (includes vendor_wheels/), then
-        pip install openai from local wheels. No network needed for Python deps.
+        Strategy: never use apt-get for python (too slow/unreliable on Daytona).
+        1. Ensure git exists (apt-get only for git, which is tiny and fast)
+        2. Clone repo (includes vendor_wheels/)
+        3. If no python3 → download standalone python from GitHub (~30MB)
+        4. Install openai from vendored wheels (fully offline)
         """
-        # Step 1: Ensure git is available
+        # Step 1: Ensure git is available (only apt-get we ever do)
         await self.exec_as_root(
             environment,
             command=(
                 "command -v git >/dev/null 2>&1 || "
-                "( for i in $(seq 1 30); do "
+                "( for i in $(seq 1 15); do "
                 "    fuser /var/lib/dpkg/lock >/dev/null 2>&1 || break; sleep 2; "
                 "  done && "
                 "  apt-get update -qq 2>/dev/null && "
@@ -70,7 +73,7 @@ class HarnessAgent(BaseInstalledAgent):
             ),
         )
 
-        # Step 2: Clone repo (includes vendor_wheels/ with openai + all deps)
+        # Step 2: Clone repo (includes vendor_wheels/)
         await self.exec_as_agent(
             environment,
             command=(
@@ -80,18 +83,34 @@ class HarnessAgent(BaseInstalledAgent):
             ),
         )
 
-        # Step 3: Install openai from vendored wheels (fully offline, no network)
+        # Step 3: If no python3, install standalone from GitHub
         await self.exec_as_root(
             environment,
             command=(
-                # Check if already importable
+                "if command -v python3 >/dev/null 2>&1; then "
+                "  echo \"python3 found: $(python3 --version)\"; "
+                "else "
+                "  echo 'No python3, installing standalone from GitHub...' && "
+                "  curl -sL -o /tmp/python.tar.gz "
+                "    'https://github.com/astral-sh/python-build-standalone/releases/"
+                "download/20250604/cpython-3.12.11+20250604-x86_64-unknown-linux-gnu-install_only.tar.gz' && "
+                "  mkdir -p /opt/python && "
+                "  tar -xzf /tmp/python.tar.gz -C /opt/python --strip-components=1 && "
+                "  ln -sf /opt/python/bin/python3 /usr/local/bin/python3 && "
+                "  ln -sf /opt/python/bin/pip3 /usr/local/bin/pip3 && "
+                "  rm -f /tmp/python.tar.gz && "
+                "  echo \"standalone python installed: $(python3 --version)\"; "
+                "fi"
+            ),
+        )
+
+        # Step 4: Install openai from vendored wheels (fully offline)
+        await self.exec_as_root(
+            environment,
+            command=(
                 "python3 -c 'import openai' 2>/dev/null || "
-                # Offline install from vendored wheels
+                # Try pip with vendored wheels
                 "( pip3 install --break-system-packages --no-index "
-                "  --find-links=/home/user/harness-agent/vendor_wheels "
-                "  openai 2>/dev/null && "
-                "  python3 -c 'import openai' 2>/dev/null ) || "
-                "( pip install --break-system-packages --no-index "
                 "  --find-links=/home/user/harness-agent/vendor_wheels "
                 "  openai 2>/dev/null && "
                 "  python3 -c 'import openai' 2>/dev/null ) || "
@@ -99,18 +118,13 @@ class HarnessAgent(BaseInstalledAgent):
                 "  --find-links=/home/user/harness-agent/vendor_wheels "
                 "  openai 2>/dev/null && "
                 "  python3 -c 'import openai' 2>/dev/null ) || "
-                # If no pip at all, try ensurepip first
-                "( python3 -m ensurepip --break-system-packages 2>/dev/null && "
-                "  python3 -m pip install --break-system-packages --no-index "
-                "  --find-links=/home/user/harness-agent/vendor_wheels "
-                "  openai 2>/dev/null ) || "
-                # Last resort: manual unzip all wheels into site-packages
-                "( SITE=$(python3 -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null) && "
+                # No pip at all — unzip wheels directly
+                "( SITE=$(python3 -c 'import site; print(site.getsitepackages()[0])') && "
                 "  for whl in /home/user/harness-agent/vendor_wheels/*.whl; do "
                 "    python3 -m zipfile -e \"$whl\" \"$SITE\" 2>/dev/null; "
                 "  done && "
                 "  python3 -c 'import openai; print(\"openai installed via wheel unzip\")' ) || "
-                "echo 'WARNING: openai install failed'"
+                "echo 'FATAL: failed to install openai'"
             ),
         )
 
