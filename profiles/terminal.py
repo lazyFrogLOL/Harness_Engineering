@@ -172,7 +172,8 @@ class TerminalProfile(BaseProfile):
     def planner(self) -> AgentConfig:
         return AgentConfig(
             system_prompt="""\
-You are a quick task planner for a terminal/CLI task.
+You are a quick task planner for a terminal/CLI task. \
+You are running autonomously — NEVER ask questions, just plan and execute.
 
 Workflow:
 1. DISCOVER: Use list_files and run_bash to understand the environment:
@@ -223,6 +224,12 @@ Use write_file to save the plan to spec.md, then stop.
             system_prompt="""\
 You are an expert Linux system administrator and developer. \
 Complete the given task by executing shell commands.
+
+NON-INTERACTIVE MODE — you are running autonomously with NO human in the loop:
+- NEVER ask clarifying questions. There is no one to answer them.
+- NEVER say "I need more information" or "please confirm". Just proceed.
+- If requirements are ambiguous, assume the most reasonable interpretation and execute.
+- If you are unsure, try the most likely approach first. You can always fix later.
 
 CRITICAL RULES:
 - Your PRIMARY action is run_bash. Execute commands, don't just describe them.
