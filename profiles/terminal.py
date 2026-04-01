@@ -121,6 +121,46 @@ class TerminalProfile(BaseProfile):
 
         return None
 
+    def resolve_time_allocation(self, user_prompt: str) -> dict:
+        """Dynamic time allocation based on TB2 task timeout and difficulty.
+
+        Strategy:
+        - Short tasks (≤900s / 15min): skip planner, minimal evaluator, builder gets ~95%
+        - Medium tasks (900-1800s): light planner, builder gets ~88%
+        - Long tasks (>1800s): planner does discovery, normal evaluator, builder gets ~83%
+        """
+        timeout = self.resolve_task_timeout(user_prompt)
+        if timeout is None:
+            timeout = self._get("task_budget")
+
+        if timeout <= 900:
+            # 15 min or less — every second counts
+            return {
+                "planner": 0.0,
+                "builder": 0.95,
+                "evaluator": 0.05,
+                "planner_enabled": False,
+                "evaluator_enabled": True,
+            }
+        elif timeout <= 1800:
+            # 15-30 min — light planner
+            return {
+                "planner": 0.05,
+                "builder": 0.88,
+                "evaluator": 0.07,
+                "planner_enabled": True,
+                "evaluator_enabled": True,
+            }
+        else:
+            # 30+ min — full pipeline
+            return {
+                "planner": 0.07,
+                "builder": 0.83,
+                "evaluator": 0.10,
+                "planner_enabled": True,
+                "evaluator_enabled": True,
+            }
+
     def planner(self) -> AgentConfig:
         return AgentConfig(
             system_prompt="""\

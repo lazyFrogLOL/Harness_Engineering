@@ -186,3 +186,21 @@ class BaseProfile(ABC):
         Returns timeout in seconds, or None to use the default budget.
         """
         return None
+
+    def resolve_time_allocation(self, user_prompt: str) -> dict:
+        """
+        Return time allocation for the three phases as fractions of total budget.
+
+        Returns dict with keys: planner, builder, evaluator (floats summing to ~1.0),
+        and optionally planner_enabled, evaluator_enabled (bools).
+
+        Override in subclasses for dynamic allocation based on task properties.
+        Default: fixed split.
+        """
+        return {
+            "planner": 0.07,    # ~7% for planning
+            "builder": 0.83,    # ~83% for building
+            "evaluator": 0.10,  # ~10% for evaluation
+            "planner_enabled": True,
+            "evaluator_enabled": True,
+        }

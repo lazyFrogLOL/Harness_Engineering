@@ -125,8 +125,18 @@ class Harness:
         max_rounds = self.profile.max_rounds() or config.MAX_HARNESS_ROUNDS
         threshold = self.profile.pass_threshold()
 
+        # ---- Resolve dynamic time allocation ----
+        allocation = self.profile.resolve_time_allocation(user_prompt)
+        skip_planner = not allocation.get("planner_enabled", True)
+        skip_evaluator = not allocation.get("evaluator_enabled", True)
+        log.info(f"Time allocation: planner={allocation['planner']:.0%} "
+                 f"builder={allocation['builder']:.0%} "
+                 f"evaluator={allocation['evaluator']:.0%} "
+                 f"(planner={'skip' if skip_planner else 'on'}, "
+                 f"evaluator={'skip' if skip_evaluator else 'on'})")
+
         # ---- Phase 1: Planning ----
-        if self.planner:
+        if self.planner and not skip_planner:
             log.info("=" * 60)
             log.info("PHASE 1: PLANNING")
             log.info("=" * 60)
@@ -187,7 +197,7 @@ class Harness:
             log.info(f"Build round {round_num} completed in {time.time() - build_start:.0f}s")
 
             # ---- Evaluate (if enabled) ----
-            if self.evaluator:
+            if self.evaluator and not skip_evaluator:
                 log.info("=" * 60)
                 log.info(f"ROUND {round_num}/{max_rounds}: EVALUATE")
                 log.info("=" * 60)
