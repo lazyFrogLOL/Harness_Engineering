@@ -4,3 +4,4 @@ workspace/
 *.pyc
 .DS_Store
 jobs/
+venv/
