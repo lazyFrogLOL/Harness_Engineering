@@ -374,7 +374,15 @@ def main():
         sys.exit(1)
 
     harness = Harness(profile)
-    harness.run(user_prompt)
+    try:
+        harness.run(user_prompt)
+    except KeyboardInterrupt:
+        log.warning("Interrupted by user.")
+        sys.exit(130)
+    except Exception as e:
+        log.error(f"Harness crashed with unhandled exception: {e}", exc_info=True)
+        # Exit 1 signals failure to Harbor, but at least we log the cause
+        sys.exit(1)
 
 
 if __name__ == "__main__":
