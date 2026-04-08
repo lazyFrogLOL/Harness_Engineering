@@ -481,18 +481,23 @@ Use write_file to save to feedback.md, then stop.
         ws_lower = _cfg.WORKSPACE.lower()
         prompt_lower = user_prompt.lower()
 
-        # Strategy 1: Exact name match against workspace path
-        for skill_dir in sorted(skills_dir.iterdir()):
-            if not skill_dir.is_dir():
-                continue
+        # Sort skills by name length DESCENDING so longer (more specific) names
+        # match first. This prevents "path-tracing" from matching before
+        # "path-tracing-reverse" when the task is path-tracing-reverse.
+        skill_dirs = sorted(
+            [d for d in skills_dir.iterdir() if d.is_dir()],
+            key=lambda d: len(d.name),
+            reverse=True,
+        )
+
+        # Strategy 1: Name match against workspace path (longest match first)
+        for skill_dir in skill_dirs:
             skill_name = skill_dir.name
             if len(skill_name) > 5 and skill_name in ws_lower:
                 return self._load_skill_content(skill_dir / "SKILL.md", skill_name)
 
-        # Strategy 2: Exact name match against prompt text
-        for skill_dir in sorted(skills_dir.iterdir()):
-            if not skill_dir.is_dir():
-                continue
+        # Strategy 2: Name match against prompt text (longest match first)
+        for skill_dir in skill_dirs:
             skill_name = skill_dir.name
             if len(skill_name) > 5 and (
                 skill_name in prompt_lower
@@ -514,9 +519,9 @@ Use write_file to save to feedback.md, then stop.
         # Strip YAML frontmatter
         import re
         content = re.sub(r"^---\s*\n.*?\n---\s*\n", "", content, flags=re.DOTALL)
-        # Cap at 8000 chars to avoid context bloat
-        if len(content) > 8000:
-            content = content[:8000] + "\n... (skill guide truncated)"
+        # Cap at 12000 chars to avoid context bloat
+        if len(content) > 12000:
+            content = content[:12000] + "\n... (skill guide truncated)"
         return (
             f"\n\n--- SKILL GUIDE: {skill_name} (auto-loaded, follow this guidance) ---\n"
             f"{content.strip()}\n"
