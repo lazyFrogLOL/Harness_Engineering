@@ -25,7 +25,10 @@
 ## 快速开始
 
 ```bash
-pip install -r requirements.txt
+uv venv
+source .venv/bin/activate
+uv sync
+# pip install -r requirements.txt
 python -m playwright install chromium  # 可选，用于浏览器测试
 
 cp .env.template .env

@@ -25,7 +25,10 @@ The following app was autonomously generated using `python harness.py "Build an 
 ## Quick Start
 
 ```bash
-pip install -r requirements.txt
+uv venv
+source .venv/bin/activate
+uv sync
+# pip install -r requirements.txt
 python -m playwright install chromium  # optional, for browser testing
 
 cp .env.template .env
